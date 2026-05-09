@@ -51,6 +51,21 @@ function sanitizePathSegment(value, fallback = "General") {
     return text.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_");
 }
 
+function pad2(value) {
+    return String(value).padStart(2, "0");
+}
+
+function formatFileTimestamp(date = new Date()) {
+    return [
+        pad2(date.getDate()),
+        pad2(date.getMonth() + 1),
+        date.getFullYear(),
+        pad2(date.getHours()),
+        pad2(date.getMinutes()),
+        pad2(date.getSeconds()),
+    ].join("_");
+}
+
 function getRowValue(row, keys) {
     for (const key of keys) {
         if (row[key] !== undefined && row[key] !== null) {
@@ -84,39 +99,137 @@ function joinUrl(baseUrl, relativePath) {
     return `${base}/${rel}`;
 }
 
-async function logTemplatePlaceholders(templatePath, slideNo) {
-    try {
-        const fileBuffer = fs.readFileSync(templatePath);
-        const zip = await JSZip.loadAsync(fileBuffer);
-        const slideEntry = zip.file(`ppt/slides/slide${slideNo}.xml`);
-        if (!slideEntry) {
-            console.log(`[PPT] Placeholder scan skipped: slide${slideNo}.xml not found in template`);
-            return;
+function unique(values) {
+    return [...new Set(values)];
+}
+
+function normalizeLookupKey(value) {
+    return safeText(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function buildRowLookup(row) {
+    const lookup = new Map();
+
+    for (const [key, value] of Object.entries(row || {})) {
+        lookup.set(key, value);
+        lookup.set(normalizeLookupKey(key), value);
+    }
+
+    return lookup;
+}
+
+function getPlaceholderValue(rowLookup, placeholder, debug = false) {
+    const variants = unique([
+        placeholder,
+        placeholder.replace(/\s+/g, ""),
+        placeholder.replace(/_/g, ""),
+        placeholder.replace(/_/g, " "),
+        normalizeLookupKey(placeholder),
+    ]);
+
+    for (const key of variants) {
+        if (rowLookup.has(key)) {
+            if (debug) {
+                console.log(
+                    `[PPT][DEBUG] Placeholder match: "${placeholder}" -> key "${key}" -> value "${safeText(rowLookup.get(key))}"`
+                );
+            }
+            return safeText(rowLookup.get(key));
         }
-        const xml = await slideEntry.async("string");
-        const shapeBlocks = Array.from(
-            xml.matchAll(/<p:sp>([\s\S]*?)<\/p:sp>/g),
+    }
+
+    if (debug) {
+        console.log(
+            `[PPT][DEBUG] Placeholder miss: "${placeholder}" | variants=${JSON.stringify(variants)}`
+        );
+    }
+
+    return "";
+}
+
+function resolveTemplateText(templateText, rowLookup, debug = false) {
+    return safeText(templateText).replace(/\{([^{}]+)\}/g, (_, placeholder) => {
+        const rawPlaceholder = safeText(placeholder);
+        const trimmedPlaceholder = rawPlaceholder.trim();
+
+        if (debug) {
+            console.log(
+                `[PPT][DEBUG] Resolving placeholder raw="${rawPlaceholder}" trimmed="${trimmedPlaceholder}" normalized="${normalizeLookupKey(trimmedPlaceholder)}"`
+            );
+        }
+
+        return getPlaceholderValue(rowLookup, trimmedPlaceholder, debug);
+    });
+}
+
+async function extractTemplateSlideBindings(templatePath, slideNo) {
+    const fileBuffer = fs.readFileSync(templatePath);
+    const zip = await JSZip.loadAsync(fileBuffer);
+    const slideEntry = zip.file(`ppt/slides/slide${slideNo}.xml`);
+
+    if (!slideEntry) {
+        throw new Error(`slide${slideNo}.xml not found in template`);
+    }
+
+    const xml = await slideEntry.async("string");
+    const textBindings = [];
+    const pictureNames = [];
+
+    const shapeBlocks = Array.from(
+        xml.matchAll(/<p:sp>([\s\S]*?)<\/p:sp>/g),
+        (m) => m[1]
+    );
+
+    console.log(`[PPT] Slide ${slideNo} placeholders/shapes from template:`);
+
+    for (const block of shapeBlocks) {
+        const nameMatch = /<p:cNvPr[^>]*name="([^"]+)"/.exec(block);
+        if (!nameMatch) continue;
+
+        const shapeName = nameMatch[1];
+        const textRuns = Array.from(
+            block.matchAll(/<a:t>(.*?)<\/a:t>/g),
             (m) => m[1]
         );
-        console.log(`[PPT] Slide ${slideNo} placeholders/shapes from template:`);
-        for (const block of shapeBlocks) {
-            const nameMatch = /<p:cNvPr[^>]*name="([^"]+)"/.exec(block);
-            if (!nameMatch) continue;
-            const shapeName = nameMatch[1];
-            const textRuns = Array.from(
-                block.matchAll(/<a:t>(.*?)<\/a:t>/g),
-                (m) => m[1]
-            );
-            const joinedText = textRuns.join("").trim();
-            if (joinedText) {
-                console.log(` - ${shapeName} => ${joinedText}`);
-            } else {
-                console.log(` - ${shapeName}`);
-            }
+        const joinedText = textRuns.join("").trim();
+        const placeholders = unique(
+            Array.from(joinedText.matchAll(/\{([^{}]+)\}/g), (m) => m[1].trim())
+        );
+
+        if (joinedText) {
+            console.log(` - ${shapeName} => ${joinedText}`);
+        } else {
+            console.log(` - ${shapeName}`);
         }
-    } catch (error) {
-        console.log(`[PPT] Placeholder scan error: ${error.message}`);
+
+        if (placeholders.length > 0) {
+            textBindings.push({
+                shapeName,
+                originalText: joinedText,
+                placeholders,
+            });
+        }
     }
+
+    const pictureBlocks = Array.from(
+        xml.matchAll(/<p:pic>([\s\S]*?)<\/p:pic>/g),
+        (m) => m[1]
+    );
+
+    for (const block of pictureBlocks) {
+        const nameMatch = /<p:cNvPr[^>]*name="([^"]+)"/.exec(block);
+        if (!nameMatch) continue;
+        pictureNames.push(nameMatch[1]);
+    }
+
+    if (pictureNames.length > 0) {
+        console.log(`[PPT] Slide ${slideNo} picture shapes from template: ${pictureNames.join(", ")}`);
+    }
+
+    return {
+        textBindings,
+        pictureNames,
+    };
 }
 
 async function normalizePptxForMsOffice(pptxPath) {
@@ -339,7 +452,7 @@ async function processGenerateProposalJob(jobId, payload) {
             "General"
         );
         const stateOutputDir = path.join(OUTPUT_DIR, stateName);
-        const outputFileName = `Proposal_${stateName}_${jobId}.pptx`;
+        const outputFileName = `Proposal_${formatFileTimestamp()}.pptx`;
 
         ensureDir(stateOutputDir);
 
@@ -368,12 +481,12 @@ async function processGenerateProposalJob(jobId, payload) {
 
         if (!fs.existsSync(selectedTemplatePath)) {
             console.log(`[PPT] Template not found: ${selectedTemplatePath}`);
-            return res.status(404).json({
-                success: false,
-                message: `Template not found. Sent TemplatePath/fileName could not be resolved.`,
-            });
+            throw new Error("Template not found. Sent TemplatePath/fileName could not be resolved.");
         }
-        await logTemplatePlaceholders(selectedTemplatePath, dynamicSlideNo);
+        const templateBindings = await extractTemplateSlideBindings(
+            selectedTemplatePath,
+            dynamicSlideNo
+        );
         throwIfJobCancelled(jobId);
         setJobProgress(jobId, 20, "template-ready");
 
@@ -449,24 +562,36 @@ async function processGenerateProposalJob(jobId, payload) {
         rows.forEach((row, index) => {
             throwIfJobCancelled(jobId);
             const imageName = downloadedImageNames[index];
+            const rowLookup = buildRowLookup(row);
+            const debugRow = index === 0;
+
+            if (debugRow) {
+                console.log(
+                    `[PPT][DEBUG] Row 1 keys: ${Object.keys(row).join(", ")}`
+                );
+            }
 
             pres.addSlide("root", dynamicSlideNo, (slide) => {
-                slide.modifyElement("Text Box 8", [
-                    modify.setText(
-                        `${safeText(getRowValue(row, ["SideName", "sideName", "Side Name"]))}  ${safeText(getRowValue(row, ["Lit", "lit"]))}  ${safeText(getRowValue(row, ["Length", "length"]))} X ${safeText(getRowValue(row, ["Width", "width"]))}`
-                    ),
-                ]);
+                for (const binding of templateBindings.textBindings) {
+                    const resolvedText = resolveTemplateText(
+                        binding.originalText,
+                        rowLookup,
+                        debugRow
+                    );
 
-                slide.modifyElement("Text Box 11", [
-                    modify.setText(safeText(getRowValue(row, ["City", "city"]))),
-                ]);
+                    if (debugRow) {
+                        console.log(
+                            `[PPT][DEBUG] Shape "${binding.shapeName}" template="${binding.originalText}" resolved="${resolvedText}"`
+                        );
+                    }
 
-                slide.modifyElement("Text Box 13", [
-                    modify.setText(safeText(getRowValue(row, ["State", "state"]))),
-                ]);
+                    slide.modifyElement(binding.shapeName, [
+                        modify.setText(resolvedText),
+                    ]);
+                }
 
-                if (imageName) {
-                    slide.modifyElement("Picture 1", [
+                if (imageName && templateBindings.pictureNames.length > 0) {
+                    slide.modifyElement(templateBindings.pictureNames[0], [
                         ModifyImageHelper.setRelationTarget(imageName),
                     ]);
                 }
