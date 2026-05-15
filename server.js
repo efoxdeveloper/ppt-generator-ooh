@@ -18,7 +18,8 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 5000;
-const APP_BASE_URL = `http://localhost:${PORT}`;
+const APP_BASE_URL = `https://pptooh.inventive.in`;
+// const APP_BASE_URL = `http://localhost:${PORT}`;
 
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
@@ -424,7 +425,9 @@ async function processGenerateProposalJob(jobId, payload) {
     try {
         throwIfJobCancelled(jobId);
         setJobProgress(jobId, 5, "validating-request");
-        const rows = payload.rows || payload.data || [];
+        // API sends media rows in reverse order, so normalize once here before
+        // downloading images and appending slides.
+        const rows = [...(payload.rows || payload.data || [])].reverse();
         const templateInfo = payload.template || payload.Template || {};
         const baseUrl = payload.baseUrl || payload.BaseUrl || "";
         const templatePathFromApi = templateInfo.TemplatePath || payload.TemplatePath || "";
