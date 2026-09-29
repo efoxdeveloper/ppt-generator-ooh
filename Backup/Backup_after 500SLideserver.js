@@ -4,13 +4,9 @@ import axios from "axios";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { loadEnvFile } from "node:process";
 import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import sharp from "sharp";
-import importAiRouter from "./routes/importAi.js";
-import checkBalanceRouter from "./routes/checkBalance.js";
-import askAiRouter from "./routes/askAi.js";
 
 import {
     Automizer,
@@ -21,22 +17,13 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const envFilePath = path.join(__dirname, ".env");
-if (fs.existsSync(envFilePath)) {
-    loadEnvFile(envFilePath);
-}
-
 const app = express();
 const PORT = 5000;
-// const APP_BASE_URL = `https://pptooh.inventive.in`;
-const APP_BASE_URL = `http://localhost:${PORT}`;
+const APP_BASE_URL = `https://pptooh.inventive.in`;
+// const APP_BASE_URL = `http://localhost:${PORT}`;
 
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
-app.use("/api/import-AI", importAiRouter);
-app.use("/api/check-balance", checkBalanceRouter);
-app.use("/api/ask-ai", askAiRouter);
-app.use("/api/ai-import", askAiRouter);
 
 const TEMPLATE_DIR = path.join(__dirname, "templates");
 const MEDIA_DIR = path.join(__dirname, "media");
@@ -51,14 +38,6 @@ const IMAGE_MAX_HEIGHT = 1080;
 const IMAGE_JPEG_QUALITY = 88;
 const jobs = new Map();
 
-process.on("uncaughtException", (error) => {
-    console.error("[PPT][FATAL] Uncaught exception:", formatErrorForLog(error));
-});
-
-process.on("unhandledRejection", (reason) => {
-    console.error("[PPT][FATAL] Unhandled rejection:", formatErrorForLog(reason));
-});
-
 app.use("/output", express.static(OUTPUT_DIR));
 
 function ensureDir(dir) {
@@ -70,110 +49,6 @@ function ensureDir(dir) {
 function safeText(value) {
     if (value === null || value === undefined) return "";
     return String(value);
-}
-
-function safeErrorValue(getter) {
-    try {
-        const value = getter();
-        return value === undefined ? null : value;
-    } catch {
-        return null;
-    }
-}
-
-function toJsonSafeValue(value) {
-    if (value === undefined) return null;
-    if (value === null) return null;
-    try {
-        return JSON.parse(JSON.stringify(value));
-    } catch {
-        return safeText(value);
-    }
-}
-
-function toSerializableError(error) {
-    try {
-        const response = safeErrorValue(() => error.response);
-        const config = safeErrorValue(() => error.config);
-        const message =
-            safeErrorValue(() => error.message) ||
-            (typeof error === "string" ? error : null);
-
-        return {
-            message,
-            name: safeErrorValue(() => error.name),
-            stack: safeErrorValue(() => error.stack),
-            code: safeErrorValue(() => error.code),
-            status: safeErrorValue(() => error.status),
-            statusCode: safeErrorValue(() => error.statusCode),
-            errno: safeErrorValue(() => error.errno),
-            syscall: safeErrorValue(() => error.syscall),
-            path: safeErrorValue(() => error.path),
-            url: safeErrorValue(() => error.url) || safeErrorValue(() => config.url),
-            method: safeErrorValue(() => error.method) || safeErrorValue(() => config.method),
-            timeout: safeErrorValue(() => config.timeout),
-            responseStatus: safeErrorValue(() => response.status),
-            responseData: toJsonSafeValue(safeErrorValue(() => response.data)),
-            timestamp: new Date().toISOString(),
-        };
-    } catch (formatError) {
-        return {
-            message: "Unable to serialize error",
-            name: safeErrorValue(() => formatError.name),
-            stack: safeErrorValue(() => formatError.stack),
-            code: null,
-            status: null,
-            statusCode: null,
-            errno: null,
-            syscall: null,
-            path: null,
-            url: null,
-            method: null,
-            timeout: null,
-            responseStatus: null,
-            responseData: null,
-            timestamp: new Date().toISOString(),
-        };
-    }
-}
-
-function sanitizeErrorForResponse(errorInfo) {
-    if (process.env.NODE_ENV !== "production" || !errorInfo) return errorInfo;
-
-    return {
-        ...errorInfo,
-        message: "Internal server error",
-        stack: null,
-        path: null,
-        url: null,
-        responseData: null,
-    };
-}
-
-function sanitizeReasonForResponse(reason, fallback = "PPT generation failed") {
-    if (process.env.NODE_ENV !== "production") return reason || fallback;
-    return fallback;
-}
-
-function formatErrorForLog(error) {
-    const errorInfo = toSerializableError(error);
-    return errorInfo.stack || JSON.stringify(errorInfo);
-}
-
-function logJobError(jobId, job, error, context = {}) {
-    const errorInfo = toSerializableError(error);
-    console.error("[PPT] Job error", {
-        jobId,
-        step: context.step || job?.step || null,
-        progress: context.progress ?? job?.progress ?? null,
-        currentRow: context.currentRow ?? job?.currentRow ?? null,
-        totalRows: context.totalRows ?? job?.totalRows ?? null,
-        currentImage: context.currentImage ?? job?.currentImage ?? null,
-        currentOperation: context.currentOperation ?? job?.currentOperation ?? null,
-        stack: errorInfo.stack,
-        error: errorInfo,
-    });
-    return errorInfo;
 }
 
 function sanitizePathSegment(value, fallback = "General") {
@@ -239,7 +114,7 @@ async function optimizeImageBuffer(inputBuffer, outputPath) {
         );
     } catch (error) {
         fs.writeFileSync(outputPath, inputBuffer);
-        console.log("[PPT] Image optimization skipped:", formatErrorForLog(error));
+        console.log(`[PPT] Image optimization skipped: ${error.message}`);
     }
 }
 
@@ -467,11 +342,6 @@ function createJob() {
         fileUrl: null,
         stateFolder: null,
         error: null,
-        reason: null,
-        currentRow: null,
-        totalRows: null,
-        currentImage: null,
-        currentOperation: null,
         createdAt: Date.now(),
         updatedAt: Date.now(),
     });
@@ -501,11 +371,10 @@ function throwIfJobCancelled(jobId) {
     }
 }
 
-function setJobProgress(jobId, progress, step, metadata = {}) {
+function setJobProgress(jobId, progress, step) {
     updateJob(jobId, {
         progress: Math.max(0, Math.min(100, Number(progress) || 0)),
         step: step || "processing",
-        ...metadata,
     });
 }
 
@@ -602,24 +471,20 @@ async function createBlankRootFromTemplate(templatePath, rootPath) {
  */
 async function processGenerateProposalJob(jobId, payload) {
     console.log(`[PPT] Job started: ${jobId}`);
+    setJobProgress(jobId, 2, "initializing");
 
     const jobMediaDir = path.join(MEDIA_DIR, jobId);
     const jobTemplateDir = path.join(TEMPLATE_DIR, jobId);
 
-    try {
-        setJobProgress(jobId, 2, "initializing", {
-            currentOperation: "initializing",
-        });
-        ensureDir(TEMPLATE_DIR);
-        ensureDir(MEDIA_DIR);
-        ensureDir(jobMediaDir);
-        ensureDir(jobTemplateDir);
-        ensureDir(OUTPUT_DIR);
+    ensureDir(TEMPLATE_DIR);
+    ensureDir(MEDIA_DIR);
+    ensureDir(jobMediaDir);
+    ensureDir(jobTemplateDir);
+    ensureDir(OUTPUT_DIR);
 
+    try {
         throwIfJobCancelled(jobId);
-        setJobProgress(jobId, 5, "validating-request", {
-            currentOperation: "validating-request",
-        });
+        setJobProgress(jobId, 5, "validating-request");
         // API sends media rows in reverse order, so normalize once here before
         // downloading images and appending slides.
         const rows = [...(payload.rows || payload.data || [])].reverse();
@@ -637,9 +502,7 @@ async function processGenerateProposalJob(jobId, payload) {
         ) || 2;
         console.log(`[PPT] DynamicSlideNo received: ${dynamicSlideNo}`);
         throwIfJobCancelled(jobId);
-        setJobProgress(jobId, 10, "preparing-template", {
-            currentOperation: "preparing-template",
-        });
+        setJobProgress(jobId, 10, "preparing-template");
 
         if (!Array.isArray(rows) || rows.length === 0) {
             console.log("[PPT] Validation failed: rows array missing/empty");
@@ -651,10 +514,6 @@ async function processGenerateProposalJob(jobId, payload) {
             );
         }
         console.log(`[PPT] Rows count: ${rows.length}`);
-        updateJob(jobId, {
-            totalRows: rows.length,
-            currentOperation: "preparing-template",
-        });
 
         const stateName = sanitizePathSegment(
             getRowValue(rows[0], ["State", "state"]),
@@ -713,16 +572,12 @@ async function processGenerateProposalJob(jobId, payload) {
             dynamicSlideNo
         );
         throwIfJobCancelled(jobId);
-        setJobProgress(jobId, 20, "template-ready", {
-            currentOperation: "template-ready",
-        });
+        setJobProgress(jobId, 20, "template-ready");
 
         const rootTemplatePath = path.join(jobTemplateDir, `${jobId}__root_blank.pptx`);
         await createBlankRootFromTemplate(selectedTemplatePath, rootTemplatePath);
         throwIfJobCancelled(jobId);
-        setJobProgress(jobId, 28, "root-ready", {
-            currentOperation: "root-ready",
-        });
+        setJobProgress(jobId, 28, "root-ready");
         const rootTemplateBuffer = fs.readFileSync(rootTemplatePath);
         const selectedTemplateBuffer = fs.readFileSync(selectedTemplatePath);
 
@@ -749,11 +604,6 @@ async function processGenerateProposalJob(jobId, payload) {
         for (let i = 0; i < rows.length; i++) {
             throwIfJobCancelled(jobId);
             const row = rows[i];
-            updateJob(jobId, {
-                currentRow: i + 1,
-                currentImage: null,
-                currentOperation: "downloading-images",
-            });
 
             const imageUrl = getRowValue(row, [
                 "MediaImage",
@@ -773,18 +623,11 @@ async function processGenerateProposalJob(jobId, payload) {
             const imageName = `media_${i + 1}.jpg`;
             const imagePath = path.join(jobMediaDir, imageName);
 
-            updateJob(jobId, {
-                currentImage: imageName,
-            });
             await downloadImage(imageUrl, imagePath);
             downloadedImageNames[i] = imageName;
             console.log(`[PPT] Row ${i + 1}: image downloaded -> ${imageName}`);
             const p = 28 + Math.floor(((i + 1) / rows.length) * 30); // 28..58
-            setJobProgress(jobId, p, "downloading-images", {
-                currentRow: i + 1,
-                currentImage: imageName,
-                currentOperation: "downloading-images",
-            });
+            setJobProgress(jobId, p, "downloading-images");
         }
 
         const imagesToLoad = downloadedImageNames.filter(Boolean);
@@ -793,19 +636,11 @@ async function processGenerateProposalJob(jobId, payload) {
             pres.loadMedia(imagesToLoad);
             console.log(`[PPT] Media loaded count: ${imagesToLoad.length}`);
         }
-        setJobProgress(jobId, 62, "building-slides", {
-            currentImage: null,
-            currentOperation: "building-slides",
-        });
+        setJobProgress(jobId, 62, "building-slides");
 
         // Duplicate the configured media slide once per JSON row.
-        for (let index = 0; index < rows.length; index++) {
+        rows.forEach((row, index) => {
             throwIfJobCancelled(jobId);
-            updateJob(jobId, {
-                currentRow: index + 1,
-                currentOperation: "building-slides",
-            });
-            const row = rows[index];
             const imageName = downloadedImageNames[index];
             const rowLookup = buildRowLookup(row);
             const debugRow = index === 0;
@@ -843,11 +678,8 @@ async function processGenerateProposalJob(jobId, payload) {
             });
             console.log(`[PPT] Row ${index + 1}: slide appended from template slide ${dynamicSlideNo}`);
             const p = 62 + Math.floor(((index + 1) / rows.length) * 24); // 62..86
-            setJobProgress(jobId, p, "building-slides", {
-                currentRow: index + 1,
-                currentOperation: "building-slides",
-            });
-        }
+            setJobProgress(jobId, p, "building-slides");
+        });
 
         // Keep every static ending slide after the configured dynamic slide.
         for (let slideNo = dynamicSlideNo + 1; slideNo <= templateSlideCount; slideNo++) {
@@ -855,21 +687,15 @@ async function processGenerateProposalJob(jobId, payload) {
             console.log(`[PPT] Ending static slide appended from template slide ${slideNo}`);
         }
         throwIfJobCancelled(jobId);
-        setJobProgress(jobId, 90, "writing-ppt", {
-            currentOperation: "writing-ppt",
-        });
+        setJobProgress(jobId, 90, "writing-ppt");
 
         await pres.write(outputFileName);
         console.log(`[PPT] File written: ${outputFileName}`);
         throwIfJobCancelled(jobId);
         const outputFilePath = path.join(stateOutputDir, outputFileName);
-        setJobProgress(jobId, 94, "normalizing", {
-            currentOperation: "normalizing",
-        });
+        setJobProgress(jobId, 94, "normalizing");
         await normalizePptxForMsOffice(outputFilePath);
-        setJobProgress(jobId, 97, "compressing", {
-            currentOperation: "compressing",
-        });
+        setJobProgress(jobId, 97, "compressing");
         await compressPptxIfNeeded(outputFilePath);
         console.log(`[PPT] Job completed: ${outputFilePath}`);
 
@@ -882,32 +708,22 @@ async function processGenerateProposalJob(jobId, payload) {
             fileName: outputFileName,
             fileUrl: `${APP_BASE_URL}/output/${encodeURIComponent(stateName)}/${encodeURIComponent(outputFileName)}`,
             stateFolder: stateName,
-            error: null,
-            reason: null,
-            currentOperation: "completed",
         });
     } catch (error) {
-        const currentJob = jobs.get(jobId);
-        const errorInfo = logJobError(jobId, currentJob, error);
-        const reason = errorInfo.message || "PPT generation failed";
-
-        if (errorInfo.name === "AbortError") {
+        console.error("PPT generation failed:", error);
+        if (error.name === "AbortError") {
             updateJob(jobId, {
                 status: "aborted",
                 success: false,
                 step: "aborted",
-                reason: "Job aborted by user",
-                error: errorInfo,
-                currentOperation: "aborted",
+                error: "Job aborted by user",
             });
         } else {
             updateJob(jobId, {
                 status: "error",
                 success: false,
                 step: "failed",
-                reason,
-                error: errorInfo,
-                currentOperation: "failed",
+                error: error.message || "PPT generation failed",
             });
         }
     } finally {
@@ -917,7 +733,7 @@ async function processGenerateProposalJob(jobId, payload) {
             fs.rmSync(jobTemplateDir, { recursive: true, force: true });
             console.log(`[PPT] Temp cleanup done for job: ${jobId}`);
         } catch (cleanupError) {
-            console.log(`[PPT] Temp cleanup warning for job ${jobId}:`, formatErrorForLog(cleanupError));
+            console.log(`[PPT] Temp cleanup warning for job ${jobId}: ${cleanupError.message}`);
         }
     }
 }
@@ -941,18 +757,7 @@ app.post("/api/ppt/generate-proposal", async (req, res) => {
 
     const jobId = createJob();
     const payload = JSON.parse(JSON.stringify(req.body));
-    void processGenerateProposalJob(jobId, payload).catch((error) => {
-        const currentJob = jobs.get(jobId);
-        const errorInfo = logJobError(jobId, currentJob, error);
-        updateJob(jobId, {
-            status: "error",
-            success: false,
-            step: "failed",
-            reason: errorInfo.message || "PPT generation failed",
-            error: errorInfo,
-            currentOperation: "failed",
-        });
-    });
+    processGenerateProposalJob(jobId, payload);
 
     return res.status(202).json({
         success: true,
@@ -983,15 +788,9 @@ app.get("/api/ppt/job-status/:jobId", (req, res) => {
             jobId: job.jobId,
             progress: job.progress,
             step: job.step,
-            createdAt: job.createdAt,
-            updatedAt: job.updatedAt,
             fileName: job.fileName,
             fileUrl: job.fileUrl,
             stateFolder: job.stateFolder,
-            currentRow: job.currentRow,
-            totalRows: job.totalRows,
-            currentImage: job.currentImage,
-            currentOperation: job.currentOperation,
         });
     }
 
@@ -1002,14 +801,7 @@ app.get("/api/ppt/job-status/:jobId", (req, res) => {
             jobId: job.jobId,
             progress: job.progress,
             step: job.step,
-            createdAt: job.createdAt,
-            updatedAt: job.updatedAt,
-            reason: sanitizeReasonForResponse(job.reason, "PPT generation failed"),
-            error: sanitizeErrorForResponse(job.error) || null,
-            currentRow: job.currentRow,
-            totalRows: job.totalRows,
-            currentImage: job.currentImage,
-            currentOperation: job.currentOperation,
+            error: job.error || "PPT generation failed",
         });
     }
 
@@ -1020,14 +812,7 @@ app.get("/api/ppt/job-status/:jobId", (req, res) => {
             jobId: job.jobId,
             progress: job.progress,
             step: job.step,
-            createdAt: job.createdAt,
-            updatedAt: job.updatedAt,
-            reason: sanitizeReasonForResponse(job.reason, "Job aborted by user"),
-            error: sanitizeErrorForResponse(job.error) || null,
-            currentRow: job.currentRow,
-            totalRows: job.totalRows,
-            currentImage: job.currentImage,
-            currentOperation: job.currentOperation,
+            error: job.error || "Job aborted by user",
         });
     }
 
@@ -1037,13 +822,7 @@ app.get("/api/ppt/job-status/:jobId", (req, res) => {
         jobId: job.jobId,
         progress: job.progress,
         step: job.step,
-        createdAt: job.createdAt,
-        updatedAt: job.updatedAt,
         message: "PPT is still generating",
-        currentRow: job.currentRow,
-        totalRows: job.totalRows,
-        currentImage: job.currentImage,
-        currentOperation: job.currentOperation,
     });
 });
 
@@ -1076,7 +855,7 @@ app.post("/api/ppt/abort-job/:jobId", (req, res) => {
             status: job.status,
             message: `Job already ${job.status}`,
             jobId,
-            error: sanitizeErrorForResponse(job.error) || null,
+            error: job.error || null,
         });
     }
 
@@ -1089,29 +868,6 @@ app.post("/api/ppt/abort-job/:jobId", (req, res) => {
         status: "processing",
         message: "Abort requested. Job will stop shortly.",
         jobId,
-    });
-});
-
-app.use((error, req, res, next) => {
-    if (res.headersSent) {
-        return next(error);
-    }
-
-    const errorInfo = toSerializableError(error);
-    console.error("[PPT] Express error:", formatErrorForLog(error));
-
-    const statusCode = Number(errorInfo.statusCode || errorInfo.status) || 500;
-    const safeStatusCode = statusCode >= 400 && statusCode < 600 ? statusCode : 500;
-    const responseError = sanitizeErrorForResponse(errorInfo);
-
-    return res.status(safeStatusCode).json({
-        success: false,
-        status: "error",
-        message:
-            process.env.NODE_ENV === "production"
-                ? "Internal server error"
-                : errorInfo.message || "Internal server error",
-        error: responseError,
     });
 });
 
